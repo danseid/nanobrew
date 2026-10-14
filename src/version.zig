@@ -1,7 +1,8 @@
 const std = @import("std");
 
 /// Compare two version strings using numeric segment comparison.
-/// Splits on '.' and '_' (underscore is revision separator in Homebrew).
+/// Splits on '.', '_' (Homebrew's revision separator) and '-'.
+/// Debian package versions need compareDebVersions instead.
 /// Returns .lt, .eq, or .gt indicating if `a` is less than, equal to, or greater than `b`.
 pub fn compareVersions(a: []const u8, b: []const u8) std.math.Order {
     // Fast path: identical strings
@@ -81,6 +82,73 @@ pub fn isUpdateAvailable(current: []const u8, latest: []const u8) bool {
     return isNewer(latest_norm, current_norm);
 }
 
+/// Compare Debian package versions with dpkg semantics:
+/// `[epoch:]upstream[-revision]`, where `~` sorts before everything, even the
+/// end of the string, and letters sort before other punctuation.
+pub fn compareDebVersions(a: []const u8, b: []const u8) std.math.Order {
+    const pa = DebVersion.parse(a);
+    const pb = DebVersion.parse(b);
+    if (pa.epoch != pb.epoch) return std.math.order(pa.epoch, pb.epoch);
+    const upstream = dpkgCompare(pa.upstream, pb.upstream);
+    if (upstream != .eq) return upstream;
+    return dpkgCompare(pa.revision, pb.revision);
+}
+
+const DebVersion = struct {
+    epoch: u64,
+    upstream: []const u8,
+    revision: []const u8,
+
+    fn parse(v: []const u8) DebVersion {
+        var rest = std.mem.trim(u8, v, " \t\r\n");
+        var epoch: u64 = 0;
+        if (std.mem.indexOfScalar(u8, rest, ':')) |colon| {
+            epoch = std.fmt.parseInt(u64, rest[0..colon], 10) catch 0;
+            rest = rest[colon + 1 ..];
+        }
+        if (std.mem.lastIndexOfScalar(u8, rest, '-')) |dash| {
+            return .{ .epoch = epoch, .upstream = rest[0..dash], .revision = rest[dash + 1 ..] };
+        }
+        return .{ .epoch = epoch, .upstream = rest, .revision = "" };
+    }
+};
+
+fn dpkgOrder(c: ?u8) i32 {
+    const ch = c orelse return 0;
+    if (std.ascii.isDigit(ch)) return 0;
+    if (std.ascii.isAlphabetic(ch)) return ch;
+    if (ch == '~') return -1;
+    return @as(i32, ch) + 256;
+}
+
+/// dpkg's verrevcmp: alternate non-digit runs (compared with dpkgOrder) and
+/// digit runs (compared numerically, ignoring leading zeros).
+fn dpkgCompare(a: []const u8, b: []const u8) std.math.Order {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < a.len or j < b.len) {
+        while ((i < a.len and !std.ascii.isDigit(a[i])) or (j < b.len and !std.ascii.isDigit(b[j]))) {
+            const ac = dpkgOrder(if (i < a.len) a[i] else null);
+            const bc = dpkgOrder(if (j < b.len) b[j] else null);
+            if (ac != bc) return std.math.order(ac, bc);
+            i += 1;
+            j += 1;
+        }
+        while (i < a.len and a[i] == '0') i += 1;
+        while (j < b.len and b[j] == '0') j += 1;
+        var first_diff: std.math.Order = .eq;
+        while (i < a.len and j < b.len and std.ascii.isDigit(a[i]) and std.ascii.isDigit(b[j])) {
+            if (first_diff == .eq) first_diff = std.math.order(a[i], b[j]);
+            i += 1;
+            j += 1;
+        }
+        if (i < a.len and std.ascii.isDigit(a[i])) return .gt;
+        if (j < b.len and std.ascii.isDigit(b[j])) return .lt;
+        if (first_diff != .eq) return first_diff;
+    }
+    return .eq;
+}
+
 fn parseNumeric(s: []const u8) ?u64 {
     if (s.len == 0) return 0;
     return std.fmt.parseInt(u64, s, 10) catch null;
@@ -99,7 +167,7 @@ const SegmentIterator = struct {
 
         const start = self.pos;
         while (self.pos < self.data.len) : (self.pos += 1) {
-            if (self.data[self.pos] == '.' or self.data[self.pos] == '_') {
+            if (self.data[self.pos] == '.' or self.data[self.pos] == '_' or self.data[self.pos] == '-') {
                 const seg = self.data[start..self.pos];
                 self.pos += 1; // skip delimiter
                 return seg;
@@ -173,4 +241,29 @@ test "isUpdateAvailable rejects downgrades and equal versions" {
 test "isUpdateAvailable normalizes release tag prefixes and whitespace" {
     try std.testing.expect(isUpdateAvailable("0.1.191", " v0.1.192\n"));
     try std.testing.expect(!isUpdateAvailable("v0.1.192", "0.1.191"));
+}
+
+test "compareVersions: dash-separated segments compare numerically" {
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("1.2-10", "1.2-3"));
+    try std.testing.expectEqual(std.math.Order.lt, compareVersions("2024-01-09", "2024-01-10"));
+}
+
+test "compareDebVersions follows dpkg ordering" {
+    const cases = [_]struct { a: []const u8, b: []const u8, want: std.math.Order }{
+        .{ .a = "1:1.0", .b = "2.0", .want = .gt },
+        .{ .a = "1.0~rc1", .b = "1.0", .want = .lt },
+        .{ .a = "1.0~rc1", .b = "1.0~rc2", .want = .lt },
+        .{ .a = "1.0-10", .b = "1.0-3", .want = .gt },
+        .{ .a = "2.36-9+deb12u4", .b = "2.36-9", .want = .gt },
+        .{ .a = "2.36-9+deb12u10", .b = "2.36-9+deb12u4", .want = .gt },
+        .{ .a = "1.0a", .b = "1.0", .want = .gt },
+        .{ .a = "1.0", .b = "1.0+b1", .want = .lt },
+        .{ .a = "1.0", .b = "1.0-0", .want = .eq },
+        .{ .a = "0:1.0-1", .b = "1.0-1", .want = .eq },
+        .{ .a = "1.2.3-1ubuntu1", .b = "1.2.3-1", .want = .gt },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.want, compareDebVersions(c.a, c.b));
+        try std.testing.expectEqual(c.want.invert(), compareDebVersions(c.b, c.a));
+    }
 }
