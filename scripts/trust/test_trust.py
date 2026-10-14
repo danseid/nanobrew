@@ -60,6 +60,13 @@ class TrustTests(unittest.TestCase):
         self.assertEqual(publish.combine([],[],[],[row],self.now),[])
         failed={**self.entry,'result':'fail'}
         self.assertEqual(publish.combine([failed,self.entry],[],[],[],self.now)[0]['result'],'fail')
+    def test_expired_attestations_are_skipped(self):
+        stale={**self.entry,'source':'attested','observed_at':self.now-31*86400}
+        self.assertEqual(publish.combine([],[],[stale],[],self.now),[])
+        fresh={**self.entry,'source':'attested'}
+        self.assertEqual(len(publish.combine([],[],[stale,fresh],[],self.now)),1)
+        with self.assertRaises(ValueError):publish.combine([],[],[{**stale,'sha256':'zz'}],[],self.now)
+        with self.assertRaises(ValueError):publish.combine([],[{**self.entry,'observed_at':self.now-31*86400}],[],[],self.now)
     def test_publish_roundtrip(self):
         inputs=self.root/'ci';inputs.mkdir();(inputs/'fixture.json').write_text(json.dumps(self.entry))
         subprocess.run([sys.executable,str(Path(__file__).with_name('publish.py')),'--ci-dir',str(inputs),'--attestations',str(self.root/'empty-attestations'),'--key',str(self.key),'--public-key',str(self.pub),'--output',str(self.output)],check=True,capture_output=True)
