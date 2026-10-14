@@ -5743,7 +5743,7 @@ fn runOutdated(alloc: std.mem.Allocator, args: []const []const u8) void {
                 if (!selected) continue;
             }
             if (idx.get(deb.name)) |idx_pkg| {
-                if (nb.version.isNewer(idx_pkg.version, deb.version)) {
+                if (nb.version.compareDebVersions(idx_pkg.version, deb.version) == .gt) {
                     stdout.print("{s} ({s} -> {s}) (deb)\n", .{ deb.name, deb.version, idx_pkg.version }) catch {};
                     deb_outdated += 1;
                 }
@@ -6851,7 +6851,7 @@ fn runDebUpgrade(alloc: std.mem.Allocator) void {
 
     for (installed_debs) |deb| {
         if (index_map.get(deb.name)) |idx_pkg| {
-            if (nb.version.isNewer(idx_pkg.version, deb.version)) {
+            if (nb.version.compareDebVersions(idx_pkg.version, deb.version) == .gt) {
                 outdated.append(alloc, .{
                     .name = deb.name,
                     .old_ver = deb.version,
