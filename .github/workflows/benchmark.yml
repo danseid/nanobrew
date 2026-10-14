@@ -63,7 +63,7 @@ jobs:
 
           # homebrew
           brew uninstall tree 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install tree 2>&1; } 2>&1 | tail -1)
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install --skip-post-install tree 2>&1; } 2>&1 | tail -1)
           brew uninstall tree 2>/dev/null || true
 
           echo "brew=${BREW_TIME}s" >> "$GITHUB_OUTPUT"
@@ -89,7 +89,7 @@ jobs:
           $ZB uninstall wget
 
           brew uninstall wget 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install wget 2>&1; } 2>&1 | tail -1)
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install --skip-post-install wget 2>&1; } 2>&1 | tail -1)
           brew uninstall wget 2>/dev/null || true
 
           echo "brew=${BREW_TIME}s" >> "$GITHUB_OUTPUT"
@@ -115,7 +115,7 @@ jobs:
           $ZB uninstall ffmpeg
 
           brew uninstall ffmpeg 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install ffmpeg 2>&1; } 2>&1 | tail -1)
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install --skip-post-install ffmpeg 2>&1; } 2>&1 | tail -1)
           brew uninstall ffmpeg 2>/dev/null || true
 
           echo "brew=${BREW_TIME}s" >> "$GITHUB_OUTPUT"
