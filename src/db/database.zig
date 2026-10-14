@@ -374,11 +374,13 @@ pub const Database = struct {
 
     pub fn recordInstall(self: *Database, name: []const u8, version: []const u8, sha256: []const u8) !void {
         const now = nowUnix();
+        var pinned = false;
 
         var i: usize = 0;
         while (i < self.kegs.items.len) {
             if (std.mem.eql(u8, self.kegs.items[i].name, name)) {
                 const old = self.kegs.items[i];
+                pinned = pinned or old.pinned;
                 self.pushHistory(name, old) catch {};
                 self.alloc.free(old.name);
                 self.alloc.free(old.version);
@@ -393,7 +395,7 @@ pub const Database = struct {
             .name = try self.alloc.dupe(u8, name),
             .version = try self.alloc.dupe(u8, version),
             .sha256 = try self.alloc.dupe(u8, sha256),
-            .pinned = false,
+            .pinned = pinned,
             .installed_at = now,
             .probe_success = false,
             .probed_at = 0,
@@ -936,6 +938,27 @@ test "legacy records default to unknown probe evidence" {
     try testing.expectEqual(@as(i64, 0), cask.probed_at);
     try testing.expectEqual(@as(u32, 0), cask.probe_schema);
     try testing.expectEqual(@as(u32, 0), cask.probe_platform);
+}
+
+test "recordInstall keeps an existing pin" {
+    var db: Database = .{
+        .alloc = testing.allocator,
+        .kegs = .empty,
+        .casks = .empty,
+        .debs = .empty,
+        .history = std.StringHashMap(std.ArrayList(HistoryEntry)).init(testing.allocator),
+    };
+    defer {
+        db.dirty = false;
+        db.close();
+    }
+
+    try db.recordInstall("pkg", "1.0", "abc");
+    try db.setPinned("pkg", true);
+    try db.recordInstall("pkg", "1.1", "def");
+    try testing.expect(db.findKeg("pkg").?.pinned);
+    try db.recordInstall("other", "1.0", "abc");
+    try testing.expect(!db.findKeg("other").?.pinned);
 }
 
 test "probe results persist against current package records" {
