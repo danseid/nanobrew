@@ -1,5 +1,8 @@
 import { handleOutcomes, aggregateOutcomes } from "./outcomes.js";
 const REPO = "justrach/nanobrew";
+// Latest *published* release. Served by /version and used by the install
+// script when GitHub is unreachable; bump after each release is published.
+const LAST_RELEASE = "0.1.212";
 
 const INSTALL_SCRIPT = `#!/bin/bash
 set -euo pipefail
@@ -9,8 +12,8 @@ INSTALL_DIR="\${NANOBREW_INSTALL_DIR:-/opt/nanobrew}"
 BIN_DIR="$INSTALL_DIR/prefix/bin"
 SITE_URL="https://nanobrew.trilok.ai"
 # Last-resort release tag if the worker's /version endpoint AND GitHub's
-# API are both unreachable. Bump on every release cut.
-FALLBACK_RELEASE="v0.1.209"
+# API are both unreachable.
+FALLBACK_RELEASE="v${LAST_RELEASE}"
 
 echo ""
 echo "  nanobrew — the fastest package manager"
@@ -2646,7 +2649,7 @@ export default {
         });
         if (!gh.ok) {
           // Rate limited — return last known version
-          return new Response("0.1.209", {
+          return new Response(LAST_RELEASE, {
             headers: {
               "content-type": "text/plain; charset=utf-8",
               "cache-control": "public, max-age=60",
@@ -2669,7 +2672,7 @@ export default {
         await cache.put(cacheKey, resp.clone());
         return resp;
       } catch {
-        return new Response("0.1.209", {
+        return new Response(LAST_RELEASE, {
           headers: {
             "content-type": "text/plain; charset=utf-8",
             "cache-control": "public, max-age=60",
