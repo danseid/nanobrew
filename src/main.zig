@@ -1660,7 +1660,7 @@ fn fullInstallOne(
             return;
         };
 
-        if (!fileExists(blob_path)) {
+        if (!nb.downloader.cachedBlobMatches(blob_path, f.bottle_sha256)) {
             const dl_req: nb.downloader.DownloadRequest = .{
                 .url = f.bottleUrl(),
                 .expected_sha256 = f.bottle_sha256,
