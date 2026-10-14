@@ -15,6 +15,10 @@ SITE_URL="https://nanobrew.trilok.ai"
 # API are both unreachable.
 FALLBACK_RELEASE="v${LAST_RELEASE}"
 
+# Never wait forever on a stalled connection (e.g. inside docker build).
+meta_curl() { curl -fsSL --connect-timeout 10 --max-time 30 "$@"; }
+download_curl() { curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 --retry 2 "$@"; }
+
 echo ""
 echo "  nanobrew — the fastest package manager"
 echo ""
@@ -58,11 +62,11 @@ else
     # and has its own fallback) BEFORE hitting GH directly. Avoids the
     # 60/hr unauthenticated rate limit on api.github.com that used to
     # break installs during traffic spikes.
-    LATEST_VER=$(curl -fsSL "$SITE_URL/version" 2>/dev/null || true)
+    LATEST_VER=$(meta_curl "$SITE_URL/version" 2>/dev/null || true)
     if [ -n "$LATEST_VER" ]; then
         LATEST="v$LATEST_VER"
     else
-        LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+        LATEST=$(meta_curl "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4 || true)
     fi
     if [ -z "$LATEST" ]; then
         echo "  Could not resolve latest release; using $FALLBACK_RELEASE"
@@ -76,7 +80,7 @@ fi
 URL="https://github.com/$REPO/releases/download/$LATEST/$TARBALL"
 SHA_URL="$URL.sha256"
 
-if ! curl -fsI "$URL" >/dev/null 2>&1; then
+if ! meta_curl -I "$URL" >/dev/null 2>&1; then
     if [ "$LATEST" != "$FALLBACK_RELEASE" ]; then
         echo "  $LATEST not found; falling back to $FALLBACK_RELEASE"
         LATEST="$FALLBACK_RELEASE"
@@ -98,8 +102,8 @@ echo "  Downloading $TARBALL..."
 TMPDIR_DL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_DL"' EXIT
 
-curl -fsSL "$URL" -o "$TMPDIR_DL/$TARBALL"
-curl -fsSL "$SHA_URL" -o "$TMPDIR_DL/$TARBALL.sha256" 2>/dev/null || true
+download_curl "$URL" -o "$TMPDIR_DL/$TARBALL"
+download_curl "$SHA_URL" -o "$TMPDIR_DL/$TARBALL.sha256" 2>/dev/null || true
 
 # Verify SHA256 if checksum file was downloaded
 if [ -s "$TMPDIR_DL/$TARBALL.sha256" ]; then
@@ -126,8 +130,12 @@ tar -xzf "$TMPDIR_DL/$TARBALL" -C "$TMPDIR_DL"
 # Create directories
 echo "  Creating directories..."
 if [ ! -d "$INSTALL_DIR" ]; then
-    sudo mkdir -p "$INSTALL_DIR"
-    sudo chown -R "$(whoami)" "$INSTALL_DIR"
+    if [ "$(id -u)" = "0" ]; then
+        mkdir -p "$INSTALL_DIR"
+    else
+        sudo mkdir -p "$INSTALL_DIR"
+        sudo chown -R "$(whoami)" "$INSTALL_DIR"
+    fi
 fi
 mkdir -p "$BIN_DIR" \\
     "$INSTALL_DIR/cache/blobs" \\
