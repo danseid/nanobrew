@@ -57,6 +57,9 @@ pub const Database = struct {
     history: std.StringHashMap(std.ArrayList(HistoryEntry)),
     dirty: bool = false,
     loaded_mtime_ns: ?i96 = null,
+    /// The file exists but could not be read or parsed. Saving would replace
+    /// every record with whatever this run added, so save() refuses.
+    unreadable: bool = false,
 
     pub const MAX_DB_SIZE: usize = 16 * 1024 * 1024;
 
@@ -81,11 +84,19 @@ pub const Database = struct {
         const max_state_bytes = MAX_DB_SIZE;
         const st = file.stat(lib_io) catch return db;
         db.loaded_mtime_ns = st.mtime.nanoseconds;
-        const sz = @min(st.size, max_state_bytes);
-        const contents = alloc.alloc(u8, sz) catch return db;
+        if (st.size > max_state_bytes) {
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database is too large to load; it will not be modified: " ++ DB_PATH ++ "\n") catch {};
+            db.unreadable = true;
+            return db;
+        }
+        const contents = alloc.alloc(u8, st.size) catch {
+            db.unreadable = true;
+            return db;
+        };
         const n_read = file.readPositionalAll(lib_io, contents, 0) catch {
             alloc.free(contents);
-            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database read failed: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database read failed; it will not be modified: " ++ DB_PATH ++ "\n") catch {};
+            db.unreadable = true;
             return db;
         };
         defer alloc.free(contents);
@@ -93,7 +104,8 @@ pub const Database = struct {
         if (data.len == 0) return db;
 
         const parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch {
-            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database parse failed; returning empty database. File may be corrupted: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database parse failed; it will not be modified until repaired or removed: " ++ DB_PATH ++ "\n") catch {};
+            db.unreadable = true;
             return db;
         };
         defer parsed.deinit();
@@ -693,6 +705,7 @@ pub const Database = struct {
 
     fn save(self: *Database) !void {
         if (!self.dirty) return;
+        if (self.unreadable) return error.DatabaseUnreadable;
         const lib_io = paths.safe_io;
         const lock_path = try std.fmt.allocPrint(self.alloc, "{s}.lock", .{self.path});
         defer self.alloc.free(lock_path);
@@ -936,6 +949,34 @@ test "legacy records default to unknown probe evidence" {
     try testing.expectEqual(@as(i64, 0), cask.probed_at);
     try testing.expectEqual(@as(u32, 0), cask.probe_schema);
     try testing.expectEqual(@as(u32, 0), cask.probe_platform);
+}
+
+test "unparseable state.json is never overwritten" {
+    const io = testing.io;
+    const path = try std.fmt.allocPrint(testing.allocator, "/tmp/nb-test-db-corrupt-{d}.json", .{std.c.getpid()});
+    defer testing.allocator.free(path);
+    defer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}.lock", .{path});
+    defer testing.allocator.free(lock_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, lock_path) catch {};
+
+    const original = "{\"kegs\":[{\"name\":\"pkg\",\"version\":\"1.0\"";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, original);
+    }
+
+    var db = try Database.openAt(testing.allocator, path);
+    try db.recordInstall("other", "2.0", "abc");
+    try testing.expectError(error.DatabaseUnreadable, db.save());
+    db.close();
+
+    var buf: [256]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    const n = try f.readPositionalAll(io, &buf, 0);
+    try testing.expectEqualStrings(original, buf[0..n]);
 }
 
 test "probe results persist against current package records" {
