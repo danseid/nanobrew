@@ -1072,9 +1072,18 @@ fn writeRegistryCache(path: []const u8, data: []const u8) !void {
         }
     }
 
-    const file = try createWritableFile(io, path);
-    defer file.close(io);
-    try file.writeStreamingAll(io, data);
+    // Write to a private temp file and rename it into place so a concurrent
+    // or interrupted refresh never leaves a truncated cache, which would be
+    // rejected and silently drop cached revocations.
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}.{d}.tmp", .{ path, std.c.getpid() });
+    errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    {
+        const file = try createWritableFile(io, tmp_path);
+        defer file.close(io);
+        try file.writeStreamingAll(io, data);
+    }
+    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
 }
 
 fn openReadableFile(io: std.Io, path: []const u8) !std.Io.File {
@@ -2095,4 +2104,25 @@ test "resolved asset macOS minimum is retained and validated" {
     const invalid_parsed = try std.json.parseFromSlice(std.json.Value, a, invalid, .{});
     defer invalid_parsed.deinit();
     try std.testing.expectError(error.InvalidField, parseResolved(a, invalid_parsed.value.object));
+}
+
+test "writeRegistryCache replaces the cache atomically" {
+    const io = testing.io;
+    const path = try std.fmt.allocPrint(testing.allocator, "/tmp/nb-test-registry-cache-{d}.json", .{std.c.getpid()});
+    defer testing.allocator.free(path);
+    defer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+
+    try writeRegistryCache(path, "old registry");
+    const reader = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer reader.close(io);
+
+    try writeRegistryCache(path, "new");
+
+    // A reader that opened the cache before the refresh keeps a complete old
+    // copy instead of seeing a truncated or half-written file.
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("old registry", buf[0..try reader.readPositionalAll(io, &buf, 0)]);
+    const fresh = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer fresh.close(io);
+    try testing.expectEqualStrings("new", buf[0..try fresh.readPositionalAll(io, &buf, 0)]);
 }
