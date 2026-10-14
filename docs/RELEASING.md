@@ -68,6 +68,7 @@ Homebrew reads `Formula/nanobrew.rb` **from this repo**. Keeping releases and th
 ## Version constants
 
 - **`src/main.zig`** — compile-time `VERSION` string (shown in `nb help`, self-update checks).
+- **`worker/src/index.js`** — `LAST_RELEASE`, the `/version` and install-script fallback when GitHub is unreachable. Bump it after the release is published, then redeploy the Worker (`cd worker && npx wrangler deploy`).
 - **`Formula/nanobrew.rb`** — must track the bottled binary users download via Homebrew; tied to GitHub Releases, not necessarily every commit on `main`.
 
 ## Verify locally
