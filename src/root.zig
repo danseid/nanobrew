@@ -86,6 +86,7 @@ comptime {
     _ = deb_distro;
     _ = deb_sources;
     _ = version;
+    _ = downloader;
     _ = autoupdate;
     _ = trust_probe;
     _ = trust_evidence;

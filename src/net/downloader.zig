@@ -57,7 +57,7 @@ pub const ParallelDownloader = struct {
     pub fn enqueue(self: *ParallelDownloader, url: []const u8, sha256: []const u8) !void {
         var path_buf: [512]u8 = undefined;
         const blob_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ BLOBS_DIR, sha256 }) catch return error.PathTooLong;
-        if (fileExists(blob_path)) return;
+        if (cachedBlobMatches(blob_path, sha256)) return;
 
         try self.queue.append(self.alloc, .{ .url = url, .expected_sha256 = sha256 });
     }
@@ -269,7 +269,7 @@ fn downloadAndExtractOne(
         return;
     };
 
-    if (!fileExists(blob_path)) {
+    if (!cachedBlobMatches(blob_path, pkg.sha256)) {
         downloadOneWithClient(alloc, client, .{
             .url = pkg.url,
             .expected_sha256 = pkg.sha256,
@@ -608,11 +608,31 @@ pub fn downloadOne(alloc: std.mem.Allocator, req: DownloadRequest) !void {
     return downloadOneWithClient(alloc, &client, req, null);
 }
 
-fn fileExists(path: []const u8) bool {
-    const _lio_fe = paths.safe_io;
-    const f = std.Io.Dir.openFileAbsolute(_lio_fe, path, .{}) catch return false;
-    f.close(_lio_fe);
-    return true;
+/// True when the cached blob at `path` still hashes to `sha256`. A blob that
+/// exists but does not match (corrupted, truncated or replaced on disk) is
+/// deleted so the caller downloads and verifies a fresh copy.
+pub fn cachedBlobMatches(path: []const u8, sha256: []const u8) bool {
+    const io = paths.safe_io;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    const matches = hashMatches(io, file, sha256);
+    file.close(io);
+    if (!matches) std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    return matches;
+}
+
+fn hashMatches(io: std.Io, file: std.Io.File, sha256: []const u8) bool {
+    if (sha256.len != 64) return false;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buffer: [65536]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const n = file.readPositionalAll(io, &buffer, offset) catch return false;
+        if (n == 0) break;
+        hasher.update(buffer[0..n]);
+        offset += n;
+    }
+    const hex = std.fmt.bytesToHex(hasher.finalResult(), .lower);
+    return std.mem.eql(u8, &hex, sha256);
 }
 
 fn isGhcrUrl(url: []const u8) bool {
@@ -660,4 +680,30 @@ test "isRetryable whitelists transient failures only" {
     try testing.expect(!isRetryable(error.PathTooLong));
     try testing.expect(!isRetryable(error.OutOfMemory));
     try testing.expect(!isRetryable(error.AccessDenied));
+}
+
+test "cachedBlobMatches re-verifies cached blobs and drops bad ones" {
+    const io = std.testing.io;
+    const path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/nb-test-blob-{d}", .{std.c.getpid()});
+    defer std.testing.allocator.free(path);
+    defer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("bottle", &digest, .{});
+    const sha = std.fmt.bytesToHex(digest, .lower);
+
+    try std.testing.expect(!cachedBlobMatches(path, &sha));
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "bottle");
+    }
+    try std.testing.expect(cachedBlobMatches(path, &sha));
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "tampered");
+    }
+    try std.testing.expect(!cachedBlobMatches(path, &sha));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io, path, .{}));
 }
