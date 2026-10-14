@@ -616,15 +616,7 @@ pub fn removeCask(
     const safe_token = filesystemToken(token) orelse return error.UnsafeToken;
 
     // 1. Delete apps from /Applications/
-    for (apps) |app| {
-        var buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "/Applications/{s}", .{app}) catch continue;
-        std.Io.Dir.cwd().deleteTree(lib_io, path) catch |err| {
-            var _b: [512]u8 = undefined;
-            const _m = std.fmt.bufPrint(&_b, "nb: could not remove {s}: {}\n", .{ app, err }) catch "nb: could not remove app\n";
-            std.Io.File.stderr().writeStreamingAll(lib_io, _m) catch {};
-        };
-    }
+    try removeAppsIn(lib_io, "/Applications", apps);
 
     // 2. Delete binary symlinks from prefix/bin/
     for (binaries) |bin| {
@@ -642,6 +634,23 @@ pub fn removeCask(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Caskroom/{s}", .{ PREFIX, safe_token }) catch return;
     std.Io.Dir.deleteDirAbsolute(lib_io, parent) catch {};
+}
+
+/// Try to delete every app, then fail if any is still there so the caller
+/// keeps the cask record (and Caskroom) for a retry.
+fn removeAppsIn(io: std.Io, applications_dir: []const u8, apps: []const []const u8) !void {
+    var failed = false;
+    for (apps) |app| {
+        var buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ applications_dir, app }) catch continue;
+        std.Io.Dir.cwd().deleteTree(io, path) catch |err| {
+            var _b: [512]u8 = undefined;
+            const _m = std.fmt.bufPrint(&_b, "nb: could not remove {s}: {}\n", .{ app, err }) catch "nb: could not remove app\n";
+            std.Io.File.stderr().writeStreamingAll(io, _m) catch {};
+            failed = true;
+        };
+    }
+    if (failed) return error.AppRemovalFailed;
 }
 
 fn downloadArtifact(alloc: std.mem.Allocator, io: std.Io, url: []const u8, dest: []const u8, cask: Cask) !bool {
@@ -1694,4 +1703,23 @@ test "archive staging preserves helpers resources and literal font names (#371 #
     try std.Io.Dir.accessAbsolute(io, adb, .{});
     // An existing version cannot absorb another package tree.
     if (commitStagedArchive(io, stage, version)) |_| return error.TestExpectedError else |_| {}
+}
+
+test "removeAppsIn reports apps it could not delete" {
+    const io = std.testing.io;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try tmp_dir.dir.createDirPath(io, "Locked.app/Contents");
+    var applications_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const applications_dir = try std.fmt.bufPrint(&applications_buf, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path[0..]});
+    var locked_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const locked = try std.fmt.bufPrintZ(&locked_buf, "{s}/Locked.app", .{applications_dir});
+    // Read-only bundle: its contents cannot be unlinked, like an app owned by
+    // another user or protected by SIP.
+    _ = std.c.chmod(locked, 0o555);
+    defer _ = std.c.chmod(locked, 0o755);
+
+    try removeAppsIn(io, applications_dir, &.{"Gone.app"});
+    try std.testing.expectError(error.AppRemovalFailed, removeAppsIn(io, applications_dir, &.{ "Locked.app", "Gone.app" }));
 }
