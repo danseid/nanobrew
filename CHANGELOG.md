@@ -4,6 +4,23 @@ All notable changes to nanobrew are documented here.
 
 ## [Unreleased]
 
+## [0.1.214] - 2026-10-14
+
+### Fixed
+- Cached bottle blobs are re-hashed against their SHA-256 before extraction; a mismatching cache entry is deleted and downloaded again. (#416)
+- A `state.json` that cannot be read or parsed is never overwritten with an almost empty database; nanobrew warns and leaves it untouched. (#415)
+- Upgrades and reinstalls keep a keg's pin. (#414)
+- The upstream registry cache is written to a temp file and renamed into place, so an interrupted or concurrent refresh can no longer leave a truncated cache that silently drops revocations. (#417)
+- Version comparison treats `-` as a separator, and `.deb` upgrades/outdated checks use dpkg ordering (epochs, `~`, revisions). (#419)
+- `nb remove --cask` keeps the cask record when an app in `/Applications` could not be deleted, instead of forgetting an app that is still installed. (#420)
+- Trust evidence publishing skips expired attestations instead of failing the weekly run. (#413)
+- Install script: curl calls time out instead of hanging (e.g. in `docker build`), root installs no longer need `sudo`, and the fallback release is used when the GitHub API fails. `/version` and the install-script fallback track the latest published release. (#422, #418, #412)
+
+### Changed
+- README: corrected Homebrew comparisons, documented that `post_install` hooks are not run, added a "Relationship with Homebrew" section, and the benchmark times `brew install --skip-post-install`. (#421, #411)
+
+Items #413–#420 were reported privately by @Rex57.
+
 ## [0.1.213] - 2026-10-05
 
 ### Added
