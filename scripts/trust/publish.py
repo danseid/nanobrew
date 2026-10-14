@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -45,6 +46,10 @@ def combine(previous, ci, attestations, field, now, run=''):
         for original in entries:
             e={**original,'source':source}
             if source == 'ci': e['run']=run
+            if source == 'attested' and isinstance(e.get('observed_at'),int) and e['observed_at'] < now-MAX_AGE \
+                    and valid({**e,'observed_at':now},now):
+                print(f"warning: skipping expired attestation {e['token']} {e['version']} {e['platform']}",file=sys.stderr)
+                continue
             if not valid(e,now): raise ValueError('Invalid '+source+' evidence')
             records.append(e)
     # Aggregates never supply executable URLs or artifact metadata. Those must
