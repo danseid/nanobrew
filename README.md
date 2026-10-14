@@ -30,11 +30,11 @@ Homebrew is great software and powers millions of dev machines. nanobrew makes d
 |---|---------|----------|
 | **Auto-update** | `brew install` runs `brew update` first (can take minutes) | `nb install` just installs. Self-update is explicit via `nb update`. |
 | **Gatekeeper quarantine** | Casks get `com.apple.quarantine` — triggers "Are you sure?" dialog | No quarantine flag — apps open immediately |
-| **Parallel downloads** | Sequential by default; set `HOMEBREW_DOWNLOAD_CONCURRENCY` to change | All dependencies download simultaneously out of the box |
+| **Parallel downloads** | Concurrent by default since November 2025 (`HOMEBREW_DOWNLOAD_CONCURRENCY`) | All dependencies download simultaneously |
 | **Runtime** | Ruby (~57 MB) | Single 1.2 MB static binary. Instant startup, no bootstrapping. |
 | **Brewfile no-ops** | `brew bundle` rechecks everything (~10s even when satisfied) | `nb bundle install` returns instantly when nothing to do |
 
-If you rely on `post_install` hooks, build-from-source options, or Mac App Store integration, Homebrew is still the right choice. nanobrew covers the fast path: bottles, casks, and bundles.
+nanobrew does not run Homebrew's Ruby `post_install` hooks, so formulae that depend on them can be left incomplete. If you rely on `post_install` hooks, build-from-source options, or Mac App Store integration, use Homebrew. nanobrew covers the fast path: bottles, casks, and bundles.
 
 | Package | Homebrew | zerobrew (cold) | zerobrew (warm) | nanobrew (cold) | nanobrew (warm) |
 |---------|----------|-----------------|-----------------|-----------------|-----------------|
@@ -42,7 +42,7 @@ If you rely on `post_install` hooks, build-from-source options, or Mac App Store
 | **ffmpeg** (11 deps) | 14.252s | 3.986s | 2.147s | **1.624s** | **0.287s** |
 | **wget** (6 deps) | 3.935s | 5.502s | 0.587s | **3.211s** | **0.027s** |
 
-> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-03-23. Auto-updated weekly.
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-03-23. Auto-updated weekly. Homebrew is timed with `brew install --skip-post-install` so neither side runs post-install hooks; the table above predates that change and refreshes on the next benchmark run.
 
 | | nanobrew | zerobrew | Homebrew |
 |---|---------|----------|----------|
@@ -405,6 +405,10 @@ The short version:
 ## Homebrew Compatibility
 
 nanobrew uses Homebrew's formulas, bottles, and cask definitions. It's a faster client for the same ecosystem — not a fork.
+
+### Relationship with Homebrew
+
+nanobrew is not an independent package ecosystem. Formula metadata, bottles, and cask definitions all come from Homebrew and the people who maintain it: nanobrew downloads Homebrew's bottles and installs them its own way. If Homebrew stopped packaging a piece of software, nanobrew could not install it either. Please report packaging problems to nanobrew first, and only to Homebrew when you can reproduce them with `brew` itself.
 
 ### What works
 
