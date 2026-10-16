@@ -675,6 +675,7 @@ fn buildPinnedFormula(
         .build_deps = try alloc.alloc([]const u8, 0),
         .caveats = try alloc.dupe(u8, cur.caveats),
         .post_install_defined = cur.post_install_defined,
+        .keg_only = cur.keg_only,
     };
 }
 
@@ -1041,8 +1042,8 @@ fn runInstall(alloc: std.mem.Allocator, args: []const []const u8) void {
                 to_install.append(alloc, f) catch {};
                 continue;
             }
-            if (formulaLinkNeedsRepair(f.name, actual_ver, use_shims, formulae.items)) {
-                linkFormulaKeg(alloc, f.name, actual_ver, use_shims, formulae.items, all_formulae) catch {};
+            if (formulaLinkNeedsRepair(f.name, actual_ver, f.keg_only, use_shims, formulae.items)) {
+                linkFormulaKeg(alloc, f.name, actual_ver, f.keg_only, use_shims, formulae.items, all_formulae) catch {};
             }
         } else |_| {
             to_install.append(alloc, f) catch {};
@@ -1532,10 +1533,14 @@ fn linkFormulaKeg(
     alloc: std.mem.Allocator,
     name: []const u8,
     version: []const u8,
+    keg_only: bool,
     use_shims: bool,
     requested: []const []const u8,
     all_formulae: []const nb.formula.Formula,
 ) !void {
+    // Homebrew never links keg-only formulae into the prefix, not even when
+    // the user asks for them by name. Only opt/<name> is linked.
+    if (keg_only) return nb.linker.linkKegWithOptions(name, version, .{ .keg_only = true });
     if (!use_shims) return nb.linker.linkKeg(name, version);
 
     if (isRequestedFormulaName(name, requested)) {
@@ -1553,9 +1558,11 @@ fn linkFormulaKeg(
 fn formulaLinkNeedsRepair(
     name: []const u8,
     version: []const u8,
+    keg_only: bool,
     use_shims: bool,
     requested: []const []const u8,
 ) bool {
+    if (keg_only) return nb.linker.needsLinkRepair(name, version, .{ .keg_only = true });
     if (!use_shims) return nb.linker.needsLinkRepair(name, version, .{});
     if (isRequestedFormulaName(name, requested)) {
         return nb.linker.needsLinkRepair(name, version, .{ .mode = .shim_root });
@@ -1613,7 +1620,7 @@ fn fullInstallOne(
             phase.store(@intFromEnum(Phase.installing), .release);
             nb.store.materializeFromRelocated(g_io, source_cache_key, f.name, expected_ver) catch break :fast;
             phase.store(@intFromEnum(Phase.linking), .release);
-            linkFormulaKeg(alloc, f.name, expected_ver, use_shims, requested, all_formulae) catch |err| {
+            linkFormulaKeg(alloc, f.name, expected_ver, f.keg_only, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
                 fail_reason.* = "link failed";
                 had_error.store(true, .release);
@@ -1713,7 +1720,7 @@ fn fullInstallOne(
             }
             // Relocated snapshot found — skip steps 4/4b, go straight to link+post-install
             phase.store(@intFromEnum(Phase.linking), .release);
-            linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
+            linkFormulaKeg(alloc, f.name, fv, f.keg_only, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
                 fail_reason.* = "link failed";
                 had_error.store(true, .release);
@@ -1807,7 +1814,7 @@ fn fullInstallOne(
 
     // 5. Link binaries
     phase.store(@intFromEnum(Phase.linking), .release);
-    linkFormulaKeg(alloc, f.name, actual_ver, use_shims, requested, all_formulae) catch |err| {
+    linkFormulaKeg(alloc, f.name, actual_ver, f.keg_only, use_shims, requested, all_formulae) catch |err| {
         stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
         fail_reason.* = "link failed";
         had_error.store(true, .release);

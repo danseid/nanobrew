@@ -250,7 +250,8 @@ fn fetchFormulaWithClientAndUpstreamRegistryOptions(
             upstream_github.fetchFormulaFromRegistry(alloc, name, loaded_registry)
         else
             upstream_github.fetchFormula(alloc, name);
-        if (upstream_result) |upstream_formula| {
+        if (upstream_result) |pinned_formula| {
+            var upstream_formula = pinned_formula;
             // The verified-upstream registry pins a version that can lag behind
             // Homebrew's live API. Prefer the live bottle when it's strictly
             // newer so installs aren't stuck on a stale pin (#308). Best-effort:
@@ -272,6 +273,10 @@ fn fetchFormulaWithClientAndUpstreamRegistryOptions(
                         upstream_formula.deinit(alloc);
                         return live;
                     }
+                    // Registry records do not store keg_only. Take it from
+                    // the live API, so the linker keeps openjdk & co. out of
+                    // the shared prefix.
+                    upstream_formula.keg_only = live.keg_only;
                     live.deinit(alloc);
                 }
             }
@@ -1107,6 +1112,11 @@ fn parseFormulaJson(alloc: std.mem.Allocator, json_data: []const u8) !Formula {
     else
         false;
 
+    const keg_only = if (root.get("keg_only")) |ko|
+        ko == .bool and ko.bool
+    else
+        false;
+
     var bottle_url = try allocDupe(alloc, "");
     errdefer alloc.free(bottle_url);
     var bottle_sha256 = try allocDupe(alloc, "");
@@ -1159,6 +1169,7 @@ fn parseFormulaJson(alloc: std.mem.Allocator, json_data: []const u8) !Formula {
         .build_deps = build_deps,
         .caveats = caveats,
         .post_install_defined = post_install_defined,
+        .keg_only = keg_only,
     };
 }
 
@@ -1336,6 +1347,27 @@ test "parseFormulaJson - includes uses_from_macos on macOS" {
         try testing.expectEqual(@as(usize, 1), f.dependencies.len);
         try testing.expectEqualStrings("mpdecimal", f.dependencies[0]);
     }
+}
+
+test "parseFormulaJson - reads keg_only" {
+    const keg_only_json =
+        \\{"name":"openjdk","desc":"","versions":{"stable":"25.0.2"},"revision":0,
+        \\"dependencies":["freetype"],"keg_only":true,
+        \\"keg_only_reason":{"reason":":shadowed_by_macos","explanation":""},
+        \\"bottle":{"stable":{"rebuild":0,"files":{"all":{"url":"https://ghcr.io/bottle/openjdk","sha256":"cafe"}}}}}
+    ;
+    const jdk = try parseFormulaJson(testing.allocator, keg_only_json);
+    defer jdk.deinit(testing.allocator);
+    try testing.expect(jdk.keg_only);
+
+    const linked_json =
+        \\{"name":"gradle","desc":"","versions":{"stable":"9.1.0"},"revision":0,
+        \\"dependencies":["openjdk"],"keg_only":false,
+        \\"bottle":{"stable":{"rebuild":0,"files":{"all":{"url":"https://ghcr.io/bottle/gradle","sha256":"cafe"}}}}}
+    ;
+    const gradle = try parseFormulaJson(testing.allocator, linked_json);
+    defer gradle.deinit(testing.allocator);
+    try testing.expect(!gradle.keg_only);
 }
 
 test "parseFormulaJson - missing name returns error" {

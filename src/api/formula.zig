@@ -39,6 +39,10 @@ pub const Formula = struct {
     /// (previous known-good version). The registry is authoritative here:
     /// live-API freshness checks must not override a security revocation.
     revoked_fallback: bool = false,
+    /// Homebrew `keg_only`: the keg is not linked into the shared prefix
+    /// (bin/, lib/, include/, share/). Only opt/<name> points at it, so
+    /// e.g. openjdk does not shadow the system `java`.
+    keg_only: bool = false,
 
     /// Effective Cellar version including the formula revision suffix.
     /// Bottle rebuilds identify bottle artifacts but do not change the Cellar path.

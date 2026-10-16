@@ -62,6 +62,9 @@ pub const LinkMode = enum {
 pub const LinkOptions = struct {
     mode: LinkMode = .global,
     shim_path_entries: []const []const u8 = &.{},
+    /// Homebrew `keg_only` formula (e.g. openjdk): link only opt/<name>,
+    /// never bin/, lib/, include/, share/ or etc/. This overrides `mode`.
+    keg_only: bool = false,
 };
 
 const subdir_mappings = [_]SubdirMapping{
@@ -1017,12 +1020,12 @@ fn executeUnlinkPlan(plan: *UnlinkPlan) void {
     }
 }
 
-fn fastUnlinkKeg(keg_dir: []const u8) void {
+fn fastUnlinkKeg(keg_dir: []const u8, mappings: []const SubdirMapping) void {
     const bench = std.c.getenv("NB_BENCH") != null;
     const t0 = milliTimestamp();
     var plan = UnlinkPlan.init();
     defer plan.deinit();
-    for (subdir_mappings) |mapping| {
+    for (mappings) |mapping| {
         var sub_buf: [512]u8 = undefined;
         const keg_subdir = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, mapping.src }) catch continue;
         collectUnlinkBucket(&plan, keg_subdir, mapping.dest, true);
@@ -1044,6 +1047,11 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
     const lib_io = paths.safe_io;
     var keg_buf: [512]u8 = undefined;
     const keg_dir = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ CELLAR_DIR, name, version }) catch return error.PathTooLong;
+
+    if (options.keg_only) {
+        unlinkShimLinks(keg_dir);
+        return linkKegOnly(name, keg_dir, &subdir_mappings, OPT_DIR);
+    }
 
     if (options.mode == .private_dependency) unlinkShimLinks(keg_dir);
 
@@ -1070,7 +1078,7 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
         // work. Shim modes keep the serial walkers (bin/ is small and the
         // wrapper logic lives there).
         if (options.mode == .private_dependency) {
-            fastUnlinkKeg(keg_dir);
+            fastUnlinkKeg(keg_dir, &subdir_mappings);
         } else {
             fastLinkKegGlobal(keg_dir);
         }
@@ -1105,16 +1113,29 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
 
     if (options.mode == .global) installManagedWrapper(name, keg_dir);
 
-    // Create opt/ symlink: prefix/opt/<name> -> Cellar/<name>/<version>
-    std.Io.Dir.createDirAbsolute(lib_io, OPT_DIR, .default_dir) catch {};
+    return createOptLink(OPT_DIR, name, keg_dir);
+}
+
+/// Create opt/ symlink: <opt_dir>/<name> -> Cellar/<name>/<version>
+fn createOptLink(opt_dir: []const u8, name: []const u8, keg_dir: []const u8) !void {
+    const lib_io = paths.safe_io;
+    std.Io.Dir.createDirAbsolute(lib_io, opt_dir, .default_dir) catch {};
     var opt_buf: [512]u8 = undefined;
-    const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ OPT_DIR, name }) catch return error.PathTooLong;
+    const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ opt_dir, name }) catch return error.PathTooLong;
     std.Io.Dir.deleteFileAbsolute(lib_io, opt_link) catch {};
     std.Io.Dir.symLinkAbsolute(lib_io, keg_dir, opt_link, .{}) catch |err| {
         var msg_buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "warning: failed to link {s}: {}\n", .{ name, err }) catch "warning: failed to link\n";
         std.Io.File.stderr().writeStreamingAll(lib_io, msg) catch {};
     };
+}
+
+/// Link a keg-only keg like Homebrew does: only <opt_dir>/<name> points at
+/// it. Links into the keg that an older nb made under `mappings` are
+/// removed, so a reinstall or upgrade cleans up the shared prefix.
+fn linkKegOnly(name: []const u8, keg_dir: []const u8, mappings: []const SubdirMapping, opt_dir: []const u8) !void {
+    unlinkKegFiles(keg_dir, mappings);
+    return createOptLink(opt_dir, name, keg_dir);
 }
 
 fn executableLinksNeedRepair(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8, mode: LinkMode, env_shim: bool) bool {
@@ -1175,10 +1196,14 @@ pub fn needsLinkRepair(name: []const u8, version: []const u8, options: LinkOptio
     const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ OPT_DIR, name }) catch return true;
     if (!symlinkTargetEquals(opt_link, keg_dir)) return true;
 
+    // A keg-only keg must have no executable links in the prefix, which is
+    // the same end state as a private dependency.
+    const mode: LinkMode = if (options.keg_only) .private_dependency else options.mode;
+
     // Mirror linkKegWithOptions' env-shim detection so the repair check
     // compares against the same link target the linker actually creates.
     var env_shim = false;
-    if (options.mode == .global) {
+    if (mode == .global) {
         var git_core_buf: [512]u8 = undefined;
         if (std.fmt.bufPrint(&git_core_buf, "{s}/libexec/git-core", .{keg_dir})) |git_core_path| {
             if (std.Io.Dir.openDirAbsolute(paths.safe_io, git_core_path, .{})) |d| {
@@ -1193,7 +1218,7 @@ pub fn needsLinkRepair(name: []const u8, version: []const u8, options: LinkOptio
         if (!isExecutableSubdir(mapping.src)) continue;
         var sub_buf: [512]u8 = undefined;
         const keg_subdir = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, mapping.src }) catch continue;
-        if (executableLinksNeedRepair(keg_subdir, mapping.dest, keg_dir, options.mode, env_shim)) return true;
+        if (executableLinksNeedRepair(keg_subdir, mapping.dest, keg_dir, mode, env_shim)) return true;
     }
 
     return false;
@@ -1226,10 +1251,22 @@ pub fn unlinkKeg(name: []const u8, version: []const u8) !void {
     var keg_buf: [512]u8 = undefined;
     const keg_dir = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ CELLAR_DIR, name, version }) catch return error.PathTooLong;
 
+    unlinkKegFiles(keg_dir, &subdir_mappings);
+    unlinkShimLinks(keg_dir);
+    removeManagedWrapper(name, keg_dir);
+
+    var opt_buf: [512]u8 = undefined;
+    const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ OPT_DIR, name }) catch return;
+    removeOptLinkIfOwned(opt_link, keg_dir);
+}
+
+/// Remove every link under the `mappings` destinations that points into
+/// `keg_dir`. Links owned by other kegs stay.
+fn unlinkKegFiles(keg_dir: []const u8, mappings: []const SubdirMapping) void {
     if (fast_link_posix) {
-        fastUnlinkKeg(keg_dir);
+        fastUnlinkKeg(keg_dir, mappings);
     } else {
-        for (subdir_mappings) |mapping| {
+        for (mappings) |mapping| {
             var sub_buf: [512]u8 = undefined;
             const keg_subdir = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, mapping.src }) catch continue;
             unlinkSubdir(keg_subdir, mapping.dest);
@@ -1240,13 +1277,6 @@ pub fn unlinkKeg(name: []const u8, version: []const u8) !void {
             }
         }
     }
-
-    unlinkShimLinks(keg_dir);
-    removeManagedWrapper(name, keg_dir);
-
-    var opt_buf: [512]u8 = undefined;
-    const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ OPT_DIR, name }) catch return;
-    removeOptLinkIfOwned(opt_link, keg_dir);
 }
 
 /// Remove prefix/opt/<name> only while it still points at `keg_dir`, the same
@@ -1509,6 +1539,61 @@ test "removeOptLinkIfOwned keeps opt/ link owned by another version (#407)" {
     if (std.Io.Dir.readLinkAbsolute(lib_io, opt_link, &tbuf)) |_| {
         return error.TestUnexpectedOptLinkSurvived;
     } else |_| {}
+}
+
+test "keg-only keg gets only an opt/ link and loses old prefix links" {
+    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, "/tmp/nb-test-kegonly-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(lib_io, root) catch {};
+
+    // openjdk-like keg: bin/java and include/jni.h.
+    const keg = try std.fmt.allocPrint(a, "{s}/Cellar/openjdk/25.0.2", .{root});
+    const keg_java = try std.fmt.allocPrint(a, "{s}/bin/java", .{keg});
+    const keg_jni = try std.fmt.allocPrint(a, "{s}/include/jni.h", .{keg});
+    testMkPath(lib_io, try std.fmt.allocPrint(a, "{s}/bin", .{keg}));
+    testMkPath(lib_io, try std.fmt.allocPrint(a, "{s}/include", .{keg}));
+    try testWriteFile(lib_io, keg_java, "#!/bin/sh\n");
+    try testWriteFile(lib_io, keg_jni, "/* jni */\n");
+
+    // Prefix state that an older nb left: links into the keg, plus a link
+    // that another keg owns.
+    const bin_dir = try std.fmt.allocPrint(a, "{s}/prefix/bin", .{root});
+    const include_dir = try std.fmt.allocPrint(a, "{s}/prefix/include", .{root});
+    const opt_dir = try std.fmt.allocPrint(a, "{s}/prefix/opt", .{root});
+    testMkPath(lib_io, bin_dir);
+    testMkPath(lib_io, include_dir);
+    const dest_java = try std.fmt.allocPrint(a, "{s}/java", .{bin_dir});
+    const dest_jni = try std.fmt.allocPrint(a, "{s}/jni.h", .{include_dir});
+    const dest_other = try std.fmt.allocPrint(a, "{s}/gradle", .{bin_dir});
+    const other_target = try std.fmt.allocPrint(a, "{s}/Cellar/gradle/9.1.0/bin/gradle", .{root});
+    try std.Io.Dir.symLinkAbsolute(lib_io, keg_java, dest_java, .{});
+    try std.Io.Dir.symLinkAbsolute(lib_io, keg_jni, dest_jni, .{});
+    try std.Io.Dir.symLinkAbsolute(lib_io, other_target, dest_other, .{});
+
+    const mappings = [_]SubdirMapping{
+        .{ .src = "bin", .dest = bin_dir },
+        .{ .src = "include", .dest = include_dir },
+    };
+    try linkKegOnly("openjdk", keg, &mappings, opt_dir);
+
+    var tbuf: [std.fs.max_path_bytes]u8 = undefined;
+    // No java or jni.h in the shared prefix ...
+    if (std.Io.Dir.readLinkAbsolute(lib_io, dest_java, &tbuf)) |_| {
+        return error.TestUnexpectedKegOnlyBinLink;
+    } else |_| {}
+    if (std.Io.Dir.readLinkAbsolute(lib_io, dest_jni, &tbuf)) |_| {
+        return error.TestUnexpectedKegOnlyIncludeLink;
+    } else |_| {}
+    // ... the link of another keg stays ...
+    const n_other = try std.Io.Dir.readLinkAbsolute(lib_io, dest_other, &tbuf);
+    try std.testing.expectEqualStrings(other_target, tbuf[0..n_other]);
+    // ... and opt/openjdk points at the keg for wrappers that use it.
+    const opt_link = try std.fmt.allocPrint(a, "{s}/openjdk", .{opt_dir});
+    const n_opt = try std.Io.Dir.readLinkAbsolute(lib_io, opt_link, &tbuf);
+    try std.testing.expectEqualStrings(keg, tbuf[0..n_opt]);
 }
 
 test "bottle payload: slow-path unlink removes keg symlinks, keeps non-keg (#347)" {
