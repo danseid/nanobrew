@@ -118,9 +118,10 @@ fn fetchVendorFormulaFromRecord(alloc: std.mem.Allocator, record: *const registr
 }
 
 fn bottlePinCompatible(minimum: ?u32, host: u32) bool {
-    // Preserve legacy pins on the previously tested macOS 15+ baseline.
-    // Unknown requirements are not proof of compatibility on older systems.
-    return host >= (minimum orelse 15);
+    // Legacy pins carry no OS requirement. The seed script picks the newest
+    // tag first (arm64_tahoe / tahoe), so assume macOS 26. Older hosts fall
+    // back to the live Homebrew API, which selects a compatible tag.
+    return host >= (minimum orelse 26);
 }
 
 test "unversioned bottle pins are not Monterey compatibility evidence" {
@@ -128,7 +129,15 @@ test "unversioned bottle pins are not Monterey compatibility evidence" {
     try std.testing.expect(!bottlePinCompatible(15, 12));
     try std.testing.expect(bottlePinCompatible(12, 12));
     try std.testing.expect(bottlePinCompatible(12, 15));
-    try std.testing.expect(bottlePinCompatible(null, 15));
+}
+
+test "unversioned bottle pins are Tahoe bottles, not Sequoia compatibility evidence" {
+    // Regression: a Tahoe pin (minos 26.0) installed on macOS 15 and failed at
+    // load time with "built for macOS 26.0 which is newer than running OS".
+    try std.testing.expect(!bottlePinCompatible(null, 15));
+    try std.testing.expect(bottlePinCompatible(null, 26));
+    try std.testing.expect(bottlePinCompatible(null, 27));
+    try std.testing.expect(bottlePinCompatible(15, 15));
 }
 
 fn fetchBottleFormulaFromRecord(alloc: std.mem.Allocator, record: *const registry_mod.Record) !Formula {
@@ -1211,11 +1220,13 @@ test "fetchFormulaFromRecord maps resolved Homebrew bottle formula" {
         \\      "assets": {
         \\        "macos-arm64": {
         \\          "url": "https://ghcr.io/v2/homebrew/core/cmake/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\          "minimum_macos_major": 12
         \\        },
         \\        "macos-x86_64": {
         \\          "url": "https://ghcr.io/v2/homebrew/core/cmake/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        \\          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\          "minimum_macos_major": 12
         \\        },
         \\        "linux-x86_64": {
         \\          "url": "https://ghcr.io/v2/homebrew/core/cmake/blobs/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -1272,11 +1283,13 @@ test "fetchFormulaFromRecord falls back to previous version when pin is revoked"
         \\      "assets": {
         \\        "macos-arm64": {
         \\          "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\          "minimum_macos_major": 12
         \\        },
         \\        "macos-x86_64": {
         \\          "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\          "minimum_macos_major": 12
         \\        },
         \\        "linux-x86_64": {
         \\          "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1296,11 +1309,13 @@ test "fetchFormulaFromRecord falls back to previous version when pin is revoked"
         \\        "assets": {
         \\          "macos-arm64": {
         \\            "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        \\            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\            "minimum_macos_major": 12
         \\          },
         \\          "macos-x86_64": {
         \\            "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        \\            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\            "minimum_macos_major": 12
         \\          },
         \\          "linux-x86_64": {
         \\            "url": "https://ghcr.io/v2/justrach/nb-bottles/cvetool/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

@@ -315,6 +315,8 @@ function seedBottleRecordFromFormula(formula, analyticsItem = null) {
       url: bottleFile.url,
       sha256: bottleFile.sha256,
     };
+    const minimumMacosMajor = minimumMacosMajorForTag(bottleFile.tag);
+    if (minimumMacosMajor !== null) resolvedAssets[platform].minimum_macos_major = minimumMacosMajor;
   }
 
   if (!resolvedAssets["macos-arm64"]) {
@@ -359,10 +361,26 @@ function bottleFileForPlatform(files, tags) {
       return {
         url: file.url,
         sha256: file.sha256.toLowerCase(),
+        tag,
       };
     }
   }
   return null;
+}
+
+const MACOS_TAG_MAJOR = {
+  big_sur: 11,
+  monterey: 12,
+  ventura: 13,
+  sonoma: 14,
+  sequoia: 15,
+  tahoe: 26,
+  golden_gate: 27,
+};
+
+// The client rejects a pin when the running macOS is older than this.
+function minimumMacosMajorForTag(tag) {
+  return MACOS_TAG_MAJOR[tag.replace(/^arm64_/, "")] ?? null;
 }
 
 async function readJson(path) {

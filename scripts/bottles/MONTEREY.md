@@ -38,8 +38,9 @@ Sources, patches and license notices accompany the artifact for inspection.
 - A source-only freshness result cannot replace a maintained bottle pin.
 - API, tap and GHCR tag selection reject bottles requiring a newer running OS.
 - Bottle pins can declare `minimum_macos_major`. Unknown legacy requirements
-  remain allowed on the existing macOS 15+ baseline, but are rejected on older
-  systems. A major-version field cannot express a minor-version requirement.
+  are treated as macOS 26, because the seed script picks the Tahoe bottle
+  first. Older systems fall back to the live Homebrew API. A major-version
+  field cannot express a minor-version requirement.
 - No default registry pin is labelled macOS 12 compatible by this change.
 
 ## Run
