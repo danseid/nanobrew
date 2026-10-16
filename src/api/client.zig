@@ -420,9 +420,10 @@ fn formulaMetadataIsNewer(candidate: Formula, current: Formula) bool {
 /// longer has at all — Homebrew removed a `depends_on` edge without a version,
 /// revision, or rebuild bump, so `formulaMetadataIsNewer` alone would keep the
 /// stale pin (webp still pinning libtiff, #359/#362). One-directional on
-/// purpose: on macOS `parseFormulaJson` merges `uses_from_macos` into live
-/// dependencies while the registry pin stores only Homebrew's raw list, so
-/// live legitimately carries extra entries — extras must never read as stale.
+/// purpose: on macOS `parseFormulaJson` merges `uses_from_macos` entries with
+/// a newer `since:` bound into live dependencies while the registry pin
+/// stores only Homebrew's raw list, so live legitimately carries extra
+/// entries — extras must never read as stale.
 fn upstreamHasRemovedDependency(live: Formula, upstream: Formula) bool {
     outer: for (upstream.dependencies) |pinned_dep| {
         for (live.dependencies) |live_dep| {
@@ -1041,23 +1042,7 @@ fn parseFormulaJson(alloc: std.mem.Allocator, json_data: []const u8) !Formula {
         }
     }
     if (builtin.os.tag == .macos) {
-        if (root.get("uses_from_macos")) |uses_val| {
-            if (uses_val == .array) {
-                for (uses_val.array.items) |dep| {
-                    if (dep != .string) continue;
-                    var present = false;
-                    for (deps.items) |existing| {
-                        if (std.mem.eql(u8, existing, dep.string)) {
-                            present = true;
-                            break;
-                        }
-                    }
-                    if (!present) {
-                        try deps.append(alloc, try allocDupe(alloc, dep.string));
-                    }
-                }
-            }
-        }
+        try appendUsesFromMacos(alloc, &deps, root, @import("formula.zig").runningMacosMajor());
     }
     const dependencies = try deps.toOwnedSlice(alloc);
     errdefer {
@@ -1171,6 +1156,52 @@ fn parseFormulaJson(alloc: std.mem.Allocator, json_data: []const u8) !Formula {
         .post_install_defined = post_install_defined,
         .keg_only = keg_only,
     };
+}
+
+/// Homebrew `uses_from_macos` names software that macOS already ships (zlib,
+/// expat, curl, swift, ...). Like Homebrew, install such an entry on macOS
+/// only when its `since:` bound is newer than the running macOS, e.g.
+/// python's `uses_from_macos "expat", since: :sequoia` on Sonoma. Object
+/// entries such as {"bison":"build"} are build-only and never installed.
+/// Merging every entry installed the 2.5 GB swift toolchain for xcodegen,
+/// and its `swift` then shadowed Xcode's /usr/bin/swift.
+fn appendUsesFromMacos(
+    alloc: std.mem.Allocator,
+    deps: *std.ArrayList([]const u8),
+    root: std.json.ObjectMap,
+    host_major: ?u32,
+) !void {
+    const uses_val = root.get("uses_from_macos") orelse return;
+    if (uses_val != .array) return;
+    const bounds: []const std.json.Value = if (root.get("uses_from_macos_bounds")) |b|
+        (if (b == .array) b.array.items else &.{})
+    else
+        &.{};
+    for (uses_val.array.items, 0..) |dep, i| {
+        if (dep != .string) continue;
+        if (i >= bounds.len or !usesFromMacosNeeded(bounds[i], host_major)) continue;
+        var present = false;
+        for (deps.items) |existing| {
+            if (std.mem.eql(u8, existing, dep.string)) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) {
+            try deps.append(alloc, try allocDupe(alloc, dep.string));
+        }
+    }
+}
+
+/// True when a `uses_from_macos_bounds` entry has a `since` macOS that is
+/// newer than `host_major`. No bound, an unknown name, or an unknown host
+/// version means macOS provides the software.
+fn usesFromMacosNeeded(bound: std.json.Value, host_major: ?u32) bool {
+    if (bound != .object) return false;
+    const since = getStr(bound.object, "since") orelse return false;
+    const since_major = @import("formula.zig").bottleTagMinimumMacos(since) orelse return false;
+    const major = host_major orelse return false;
+    return major < since_major;
 }
 
 fn findBottleTag(files: std.json.ObjectMap) ?std.json.Value {
@@ -1328,7 +1359,7 @@ test "parseFormulaJson - parses dependencies array" {
     try testing.expectEqualStrings("x265", f.dependencies[2]);
 }
 
-test "parseFormulaJson - includes uses_from_macos on macOS" {
+test "parseFormulaJson - uses_from_macos without since bound is not a dependency" {
     const json =
         \\{"name":"python@3.14","desc":"","versions":{"stable":"3.14.3"},"revision":0,
         \\"dependencies":["mpdecimal"],
@@ -1338,14 +1369,57 @@ test "parseFormulaJson - includes uses_from_macos on macOS" {
     const f = try parseFormulaJson(testing.allocator, json);
     defer f.deinit(testing.allocator);
 
-    if (builtin.os.tag == .macos) {
-        try testing.expectEqual(@as(usize, 3), f.dependencies.len);
-        try testing.expectEqualStrings("mpdecimal", f.dependencies[0]);
-        try testing.expectEqualStrings("expat", f.dependencies[1]);
-        try testing.expectEqualStrings("libffi", f.dependencies[2]);
-    } else {
-        try testing.expectEqual(@as(usize, 1), f.dependencies.len);
-        try testing.expectEqualStrings("mpdecimal", f.dependencies[0]);
+    try testing.expectEqual(@as(usize, 1), f.dependencies.len);
+    try testing.expectEqualStrings("mpdecimal", f.dependencies[0]);
+}
+
+// Regression: xcodegen has `uses_from_macos "swift"` and needs Xcode. nb
+// installed the 2.5 GB swift toolchain, and its `swift` shadowed Xcode's.
+test "parseFormulaJson - xcodegen does not depend on swift" {
+    const json =
+        \\{"name":"xcodegen","desc":"Generate your Xcode project from a spec file and your folder structure",
+        \\"versions":{"stable":"2.44.1"},"revision":0,
+        \\"dependencies":[],"build_dependencies":[],
+        \\"uses_from_macos":["swift",{"unzip":"build"}],"uses_from_macos_bounds":[{},{}],
+        \\"requirements":[{"name":"xcode","cask":null,"download":null,"version":"15.3","contexts":["build"],"specs":["stable","head"]}],
+        \\"keg_only":false,
+        \\"bottle":{"stable":{"rebuild":0,"files":{"all":{"url":"https://ghcr.io/bottle/xcodegen","sha256":"cafe"}}}}}
+    ;
+    const f = try parseFormulaJson(testing.allocator, json);
+    defer f.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), f.dependencies.len);
+    try testing.expectEqual(@as(usize, 0), f.build_deps.len);
+}
+
+test "appendUsesFromMacos - installs only entries with a newer since bound" {
+    // python@3.14: expat is part of macOS only since Sequoia (15).
+    const json =
+        \\{"uses_from_macos":["bzip2","expat",{"unzip":"build"},"zlib"],
+        \\"uses_from_macos_bounds":[{},{"since":"sequoia"},{"since":"tahoe"},{"since":"future_cat"}]}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const cases = [_]struct { host: ?u32, want_expat: bool }{
+        .{ .host = 14, .want_expat = true },
+        .{ .host = 15, .want_expat = false },
+        .{ .host = 26, .want_expat = false },
+        .{ .host = null, .want_expat = false },
+    };
+    for (cases) |case| {
+        var deps: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (deps.items) |dep| testing.allocator.free(dep);
+            deps.deinit(testing.allocator);
+        }
+        try appendUsesFromMacos(testing.allocator, &deps, parsed.value.object, case.host);
+        if (case.want_expat) {
+            try testing.expectEqual(@as(usize, 1), deps.items.len);
+            try testing.expectEqualStrings("expat", deps.items[0]);
+        } else {
+            try testing.expectEqual(@as(usize, 0), deps.items.len);
+        }
     }
 }
 
