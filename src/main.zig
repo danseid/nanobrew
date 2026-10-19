@@ -50,6 +50,8 @@ const Command = enum {
     telemetry,
     nuke,
     migrate,
+    tap,
+    untap,
 };
 
 fn shouldCheckForUpdate(cmd: Command) bool {
@@ -253,6 +255,8 @@ pub fn main(init: std.process.Init) !void {
         .telemetry => runTelemetry(args[2..]),
         .nuke => runNuke(args[2..]),
         .migrate => runMigrate(alloc),
+        .tap => runTap(alloc, args[2..]),
+        .untap => runUntap(alloc, args[2..]),
     }
 
     // The best-effort update request must not delay output-only commands.
@@ -343,6 +347,8 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "uninstall-self", Command.nuke },
         .{ "migrate", Command.migrate },
         .{ "reinstall", Command.reinstall },
+        .{ "tap", Command.tap },
+        .{ "untap", Command.untap },
     };
     inline for (cmds) |pair| {
         if (std.mem.eql(u8, arg, pair[0])) return pair[1];
@@ -4475,6 +4481,9 @@ fn printUsage() void {
         \\  list [--versions|--names]
         \\                           List installed packages, casks, and debs
         \\  leaves [--tree]          List packages with no dependents
+        \\  tap [<user/tap> <url>]   List taps with a custom URL, or add one
+        \\                           (GitHub only, like `brew tap user/tap URL`)
+        \\  untap <user/tap>         Remove a custom tap URL
         \\  info <formula>           Show formula info from Homebrew API
         \\  info --cask <app>        Show cask info from Homebrew API
         \\  search <query>           Search for formulas and casks
@@ -5883,6 +5892,80 @@ fn renderDepTree(stdout: anytype, resolver: *nb.deps.DepResolver, name: []const 
     }
 }
 
+// ── nb tap / nb untap ──
+
+/// `nb tap` lists custom tap URLs. `nb tap <user>/<tap> <url>` maps a tap to a
+/// GitHub repo whose name is not "homebrew-<tap>". Taps without a custom URL
+/// need no `nb tap`: `nb install user/tap/name` finds them directly.
+fn runTap(alloc: std.mem.Allocator, args: []const []const u8) void {
+    const stdout = StdoutWriter{};
+    const stderr = StderrWriter{};
+    const taps = nb.tap.readTapsFile(alloc);
+    defer alloc.free(taps);
+
+    if (args.len == 0) {
+        stdout.print("{s}", .{taps}) catch {};
+        return;
+    }
+    const name = args[0];
+    const slash = std.mem.indexOfScalar(u8, name, '/') orelse 0;
+    if (slash == 0 or slash == name.len - 1 or std.mem.indexOfScalarPos(u8, name, slash + 1, '/') != null) {
+        stderr.print("nb: invalid tap name '{s}' (expected user/tap)\n", .{name}) catch {};
+        std.process.exit(1);
+    }
+    if (args.len == 1) {
+        stdout.print("nb: no URL given; nb finds {s} at github.com/{s}/homebrew-{s} without `nb tap`\n", .{ name, name[0..slash], name[slash + 1 ..] }) catch {};
+        return;
+    }
+    const repo = nb.tap.githubRepoFromUrl(args[1]) orelse {
+        stderr.print("nb: unsupported tap URL '{s}' (expected https://github.com/<owner>/<repo>)\n", .{args[1]}) catch {};
+        std.process.exit(1);
+    };
+    writeTapsFile(alloc, taps, name[0..slash], name[slash + 1 ..], repo);
+    stdout.print("==> Tapped {s} ({s})\n", .{ name, args[1] }) catch {};
+}
+
+fn runUntap(alloc: std.mem.Allocator, args: []const []const u8) void {
+    const stdout = StdoutWriter{};
+    const stderr = StderrWriter{};
+    if (args.len != 1) {
+        stderr.print("Usage: nb untap <user/tap>\n", .{}) catch {};
+        std.process.exit(1);
+    }
+    const taps = nb.tap.readTapsFile(alloc);
+    defer alloc.free(taps);
+    const name = args[0];
+    const slash = std.mem.indexOfScalar(u8, name, '/') orelse {
+        stderr.print("nb: invalid tap name '{s}' (expected user/tap)\n", .{name}) catch {};
+        std.process.exit(1);
+    };
+    if (nb.tap.findTapEntry(taps, name[0..slash], name[slash + 1 ..]) == null) {
+        stderr.print("nb: no custom tap URL for {s}\n", .{name}) catch {};
+        std.process.exit(1);
+    }
+    writeTapsFile(alloc, taps, name[0..slash], name[slash + 1 ..], null);
+    stdout.print("==> Untapped {s}\n", .{name}) catch {};
+}
+
+fn writeTapsFile(alloc: std.mem.Allocator, taps: []const u8, user: []const u8, tap: []const u8, repo: ?[]const u8) void {
+    const stderr = StderrWriter{};
+    const body = nb.tap.updatedTapsFile(alloc, taps, user, tap, repo) catch {
+        stderr.print("nb: out of memory\n", .{}) catch {};
+        std.process.exit(1);
+    };
+    defer alloc.free(body);
+    std.Io.Dir.cwd().createDirPath(g_io, paths.CONFIG_DIR) catch {};
+    const file = std.Io.Dir.createFileAbsolute(g_io, nb.tap.TAPS_FILE, .{}) catch |err| {
+        stderr.print("nb: cannot write {s}: {s}\n", .{ nb.tap.TAPS_FILE, @errorName(err) }) catch {};
+        std.process.exit(1);
+    };
+    defer file.close(g_io);
+    file.writeStreamingAll(g_io, body) catch |err| {
+        stderr.print("nb: cannot write {s}: {s}\n", .{ nb.tap.TAPS_FILE, @errorName(err) }) catch {};
+        std.process.exit(1);
+    };
+}
+
 // ── nb services ──
 
 fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
@@ -6014,6 +6097,8 @@ fn runCompletions(args: []const []const u8) void {
             \\    'reinstall:Reinstall packages'
             \\    'list:List installed packages'
             \\    'leaves:List packages with no dependents'
+            \\    'tap:List taps with a custom URL, or add one'
+            \\    'untap:Remove a custom tap URL'
             \\    'info:Show formula info'
             \\    'search:Search for packages'
             \\    'where:Find packages by pattern (installed, files, index)'
@@ -6087,7 +6172,7 @@ fn runCompletions(args: []const []const u8) void {
     } else if (std.mem.eql(u8, shell, "bash")) {
         stdout.print(
             \\_nb_completions() {{
-            \\  local commands="init install remove list leaves info search where upgrade update update-registry autoupdate version doctor cleanup outdated pin unpin rollback switch bundle deps services completions trust telemetry nuke migrate help"
+            \\  local commands="init install remove list leaves tap untap info search where upgrade update update-registry autoupdate version doctor cleanup outdated pin unpin rollback switch bundle deps services completions trust telemetry nuke migrate help"
             \\  if [[ $COMP_CWORD -eq 1 ]]; then
             \\    COMPREPLY=($(compgen -W "$commands" -- "${{COMP_WORDS[COMP_CWORD]}}"))
             \\  else
@@ -6121,6 +6206,8 @@ fn runCompletions(args: []const []const u8) void {
             \\complete -c nb -n '__fish_use_subcommand' -a 'reinstall' -d 'Reinstall packages'
             \\complete -c nb -n '__fish_use_subcommand' -a 'list' -d 'List installed packages'
             \\complete -c nb -n '__fish_use_subcommand' -a 'leaves' -d 'List packages with no dependents'
+            \\complete -c nb -n '__fish_use_subcommand' -a 'tap' -d 'List taps with a custom URL, or add one'
+            \\complete -c nb -n '__fish_use_subcommand' -a 'untap' -d 'Remove a custom tap URL'
             \\complete -c nb -n '__fish_use_subcommand' -a 'info' -d 'Show formula info'
             \\complete -c nb -n '__fish_use_subcommand' -a 'search' -d 'Search for packages'
             \\complete -c nb -n '__fish_use_subcommand' -a 'where' -d 'Find packages by pattern'

@@ -4,8 +4,10 @@
 // Input: "user/tap/formula" (e.g. "steipete/tap/sag")
 // Repo:  github.com/<user>/homebrew-<tap>/Formula/<name>.rb
 //        github.com/<user>/homebrew-<tap>/Casks/<name>.rb
+// A tap added with `nb tap <user>/<tap> <url>` uses the repo from that URL.
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 const Formula = @import("formula.zig").Formula;
 const BOTTLE_TAG = @import("formula.zig").BOTTLE_TAG;
 const BOTTLE_FALLBACKS = @import("formula.zig").BOTTLE_FALLBACKS;
@@ -22,7 +24,12 @@ const is_linux = builtin.os.tag == .linux;
 pub fn fetchTapFormula(alloc: std.mem.Allocator, client: ?*std.http.Client, name: []const u8) !Formula {
     const ref = parseTapRef(name) orelse return error.FormulaNotFound;
 
-    const urls = try tapFormulaUrls(alloc, ref);
+    const taps = readTapsFile(alloc);
+    defer alloc.free(taps);
+    var repo_buf: [256]u8 = undefined;
+    const repo = try tapRepo(&repo_buf, ref, taps);
+
+    const urls = try tapFormulaUrls(alloc, repo, ref.formula);
     defer for (urls) |u| alloc.free(u);
 
     var ruby_src: ?[]u8 = null;
@@ -45,7 +52,12 @@ pub fn fetchTapFormula(alloc: std.mem.Allocator, client: ?*std.http.Client, name
 pub fn fetchTapCask(alloc: std.mem.Allocator, name: []const u8) !Cask {
     const ref = parseTapRef(name) orelse return error.CaskNotFound;
 
-    const urls = try tapCaskUrls(alloc, ref);
+    const taps = readTapsFile(alloc);
+    defer alloc.free(taps);
+    var repo_buf: [256]u8 = undefined;
+    const repo = try tapRepo(&repo_buf, ref, taps);
+
+    const urls = try tapCaskUrls(alloc, repo, ref.formula);
     defer for (urls) |u| alloc.free(u);
 
     var ruby_src: ?[]u8 = null;
@@ -240,19 +252,96 @@ const TapRef = struct {
     formula: []const u8,
 };
 
-fn tapFormulaUrls(alloc: std.mem.Allocator, ref: TapRef) ![3][]const u8 {
+fn tapFormulaUrls(alloc: std.mem.Allocator, repo: []const u8, formula: []const u8) ![3][]const u8 {
     return .{
-        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/{s}.rb", .{ ref.user, ref.tap, ref.formula }),
-        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Formula/{s}.rb", .{ ref.user, ref.tap, ref.formula }),
-        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Formula/{c}/{s}.rb", .{ ref.user, ref.tap, ref.formula[0], ref.formula }),
+        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/HEAD/{s}.rb", .{ repo, formula }),
+        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/HEAD/Formula/{s}.rb", .{ repo, formula }),
+        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/HEAD/Formula/{c}/{s}.rb", .{ repo, formula[0], formula }),
     };
 }
 
-fn tapCaskUrls(alloc: std.mem.Allocator, ref: TapRef) ![2][]const u8 {
+fn tapCaskUrls(alloc: std.mem.Allocator, repo: []const u8, cask: []const u8) ![2][]const u8 {
     return .{
-        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Casks/{s}.rb", .{ ref.user, ref.tap, ref.formula }),
-        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Casks/{c}/{s}.rb", .{ ref.user, ref.tap, ref.formula[0], ref.formula }),
+        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/HEAD/Casks/{s}.rb", .{ repo, cask }),
+        try std.fmt.allocPrint(alloc, "https://raw.githubusercontent.com/{s}/HEAD/Casks/{c}/{s}.rb", .{ repo, cask[0], cask }),
     };
+}
+
+// ── Custom tap remotes (`nb tap <user>/<tap> <url>`) ──
+
+/// One tap per line: "<user>/<tap> <owner>/<repo>". Missing file = no custom taps.
+pub const TAPS_FILE = paths.CONFIG_DIR ++ "/taps";
+
+/// Contents of TAPS_FILE, or "" when it is missing or unreadable.
+/// Free with `alloc.free` (a no-op for "").
+pub fn readTapsFile(alloc: std.mem.Allocator) []const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(paths.safe_io, TAPS_FILE, alloc, .limited(64 * 1024)) catch "";
+}
+
+/// GitHub repo ("owner/repo") that holds a tap. A custom remote from `taps`
+/// wins; otherwise Homebrew's default "<user>/homebrew-<tap>".
+fn tapRepo(buf: []u8, ref: TapRef, taps: []const u8) ![]const u8 {
+    if (findTapEntry(taps, ref.user, ref.tap)) |repo| return repo;
+    return std.fmt.bufPrint(buf, "{s}/homebrew-{s}", .{ ref.user, ref.tap });
+}
+
+/// Repo for "<user>/<tap>" in `taps`, or null. Names match case-insensitively, as in Homebrew.
+pub fn findTapEntry(taps: []const u8, user: []const u8, tap: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, taps, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const sep = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const name = line[0..sep];
+        const slash = std.mem.indexOfScalar(u8, name, '/') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(name[0..slash], user)) continue;
+        if (!std.ascii.eqlIgnoreCase(name[slash + 1 ..], tap)) continue;
+        const repo = std.mem.trim(u8, line[sep + 1 ..], " \t");
+        if (repo.len > 0) return repo;
+    }
+    return null;
+}
+
+/// "owner/repo" from "https://github.com/owner/repo" (optional ".git" or "/"),
+/// or null. nb fetches tap files from raw.githubusercontent.com, so only
+/// GitHub HTTPS URLs work.
+pub fn githubRepoFromUrl(url: []const u8) ?[]const u8 {
+    const prefix = "https://github.com/";
+    if (!std.mem.startsWith(u8, url, prefix)) return null;
+    var rest = url[prefix.len..];
+    if (std.mem.endsWith(u8, rest, "/")) rest = rest[0 .. rest.len - 1];
+    if (std.mem.endsWith(u8, rest, ".git")) rest = rest[0 .. rest.len - 4];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    if (!isRepoPart(rest[0..slash]) or !isRepoPart(rest[slash + 1 ..])) return null;
+    return rest;
+}
+
+fn isRepoPart(s: []const u8) bool {
+    if (s.len == 0 or s[0] == '.') return false;
+    for (s) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.')) return false;
+    }
+    return true;
+}
+
+/// Write `taps` with "<user>/<tap>" removed and, when `repo` is set, added again
+/// pointing to `repo`. Returns the new file contents; the caller frees it.
+pub fn updatedTapsFile(alloc: std.mem.Allocator, taps: []const u8, user: []const u8, tap: []const u8, repo: ?[]const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, taps, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (findTapEntry(line, user, tap) != null) continue;
+        try out.appendSlice(alloc, line);
+        try out.append(alloc, '\n');
+    }
+    if (repo) |r| {
+        const entry = try std.fmt.allocPrint(alloc, "{s}/{s} {s}\n", .{ user, tap, r });
+        defer alloc.free(entry);
+        try out.appendSlice(alloc, entry);
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 pub fn parseTapRef(name: []const u8) ?TapRef {
@@ -927,7 +1016,8 @@ test "parseTapRef - rejects triple slash" {
 
 test "tapFormulaUrls includes root-level fallback before Formula paths" {
     const ref = parseTapRef("J-x-Z/tap/cocoa-way").?;
-    const urls = try tapFormulaUrls(testing.allocator, ref);
+    var buf: [256]u8 = undefined;
+    const urls = try tapFormulaUrls(testing.allocator, try tapRepo(&buf, ref, ""), ref.formula);
     defer for (urls) |url| testing.allocator.free(url);
 
     try testing.expectEqual(@as(usize, 3), urls.len);
@@ -938,12 +1028,51 @@ test "tapFormulaUrls includes root-level fallback before Formula paths" {
 
 test "tapCaskUrls keeps Casks lookup order" {
     const ref = parseTapRef("farion1231/ccswitch/cc-switch").?;
-    const urls = try tapCaskUrls(testing.allocator, ref);
+    var buf: [256]u8 = undefined;
+    const urls = try tapCaskUrls(testing.allocator, try tapRepo(&buf, ref, ""), ref.formula);
     defer for (urls) |url| testing.allocator.free(url);
 
     try testing.expectEqual(@as(usize, 2), urls.len);
     try testing.expectEqualStrings("https://raw.githubusercontent.com/farion1231/homebrew-ccswitch/HEAD/Casks/cc-switch.rb", urls[0]);
     try testing.expectEqualStrings("https://raw.githubusercontent.com/farion1231/homebrew-ccswitch/HEAD/Casks/c/cc-switch.rb", urls[1]);
+}
+
+test "tapCaskUrls uses a custom tap remote from the taps file" {
+    // brew tap heyderekj/slinky https://github.com/heyderekj/slinky
+    const ref = parseTapRef("heyderekj/slinky/slinky").?;
+    const taps = "other/tap other/homebrew-x\nHeyDerekJ/Slinky heyderekj/slinky\n";
+    var buf: [256]u8 = undefined;
+    const urls = try tapCaskUrls(testing.allocator, try tapRepo(&buf, ref, taps), ref.formula);
+    defer for (urls) |url| testing.allocator.free(url);
+
+    try testing.expectEqualStrings("https://raw.githubusercontent.com/heyderekj/slinky/HEAD/Casks/slinky.rb", urls[0]);
+}
+
+test "githubRepoFromUrl accepts GitHub repo URLs and rejects others" {
+    try testing.expectEqualStrings("heyderekj/slinky", githubRepoFromUrl("https://github.com/heyderekj/slinky").?);
+    try testing.expectEqualStrings("heyderekj/slinky", githubRepoFromUrl("https://github.com/heyderekj/slinky.git").?);
+    try testing.expectEqualStrings("a-b/c.d_e", githubRepoFromUrl("https://github.com/a-b/c.d_e/").?);
+    try testing.expect(githubRepoFromUrl("http://github.com/a/b") == null);
+    try testing.expect(githubRepoFromUrl("https://gitlab.com/a/b") == null);
+    try testing.expect(githubRepoFromUrl("https://github.com/a") == null);
+    try testing.expect(githubRepoFromUrl("https://github.com/a/b/tree/main") == null);
+    try testing.expect(githubRepoFromUrl("https://github.com/../b") == null);
+    try testing.expect(githubRepoFromUrl("https://github.com/a/b c") == null);
+}
+
+test "updatedTapsFile replaces, adds and removes entries" {
+    const a = testing.allocator;
+    const added = try updatedTapsFile(a, "", "heyderekj", "slinky", "heyderekj/slinky");
+    defer a.free(added);
+    try testing.expectEqualStrings("heyderekj/slinky heyderekj/slinky\n", added);
+
+    const replaced = try updatedTapsFile(a, "x/y x/homebrew-y\nheyderekj/slinky old/repo\n", "HeyDerekJ", "slinky", "heyderekj/slinky");
+    defer a.free(replaced);
+    try testing.expectEqualStrings("x/y x/homebrew-y\nHeyDerekJ/slinky heyderekj/slinky\n", replaced);
+
+    const removed = try updatedTapsFile(a, replaced, "heyderekj", "slinky", null);
+    defer a.free(removed);
+    try testing.expectEqualStrings("x/y x/homebrew-y\n", removed);
 }
 
 test "parseRubyCask - binary target defaults to basename and honors target override" {
